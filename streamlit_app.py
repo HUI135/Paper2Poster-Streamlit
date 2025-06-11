@@ -9,7 +9,7 @@ import qrcode
 import json
 
 # --- Streamlit 페이지 설정 ---
-st.set_page_config(page_title="PosterGenius Assistant v8", layout="wide")
+st.set_page_config(page_title="PosterGenius Assistant v9", layout="wide")
 
 # --- 폰트 로드 ---
 def load_font(font_filename):
@@ -27,24 +27,37 @@ font_bold, font_regular_large, font_regular_small, font_caption = load_font("Not
 
 # --- 핵심 기능 함수 ---
 
+# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼ 최종 수정: 100% 자동 이미지 반전 교정 ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
 def extract_images_from_pdf(pdf_stream):
+    """PDF에서 이미지를 추출하고, 변환 행렬을 분석하여 자동으로 반전을 교정합니다."""
     images = []
     try:
         pdf_stream.seek(0)
         doc = fitz.open(stream=pdf_stream, filetype="pdf")
-        for page in doc:
-            for img_info in page.get_images(full=True):
-                if img_info[0] < 0 or img_info[2] < 150 or img_info[3] < 150: continue
-                base_image = doc.extract_image(img_info[0])
+        for page_num in range(len(doc)):
+            # get_image_info() 를 사용하여 변환 행렬 정보까지 가져옴
+            for img_info in doc.page_images(page_num):
+                if img_info['width'] < 150 or img_info['height'] < 150: continue
+
+                # 변환 행렬(transformation matrix)의 determinant 값으로 반전 여부 판단
+                # matrix = (a, b, c, d, e, f) -> det = a*d - b*c
+                tm = img_info['transform']
+                is_flipped = (tm[0] * tm[3] - tm[1] * tm[2]) < 0
+
+                base_image = doc.extract_image(img_info['xref'])
                 pil_image = Image.open(BytesIO(base_image["image"]))
                 if pil_image.mode != "RGB": pil_image = pil_image.convert("RGB")
+                
+                if is_flipped:
+                    pil_image = ImageOps.mirror(pil_image) # 감지된 경우에만 교정
+
                 images.append(pil_image)
         return images
     except Exception as e:
         st.warning(f"이미지 추출 중 오류: {e}"); return []
 
 def extract_and_summarize(client, text):
-    st.info("GPT가 논문 전체를 분석하여 섹션 추출 및 요약을 동시에 진행합니다...")
+    st.info("GPT가 논문 전체 구조를 분석하여 섹션 추출 및 요약을 동시에 진행합니다...")
     system_prompt = "You are an expert academic assistant. Your task is to analyze an academic paper's text. First, extract the content of the 'Introduction', 'Methodology', and 'Results' sections. For 'Methodology', also accept 'Methods'. For 'Results', also accept 'Experiments'. Then, summarize each extracted section in 3-4 sentences in KOREAN. Respond ONLY with a valid JSON object. The JSON object must have keys 'introduction_summary', 'methodology_summary', and 'results_summary'. If a section is not found, its summary should be a string stating that. Do not include explanations outside the JSON."
     try:
         response = client.chat.completions.create(model="gpt-4-turbo", messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": text[:15000]}], response_format={"type": "json_object"})
@@ -53,7 +66,6 @@ def extract_and_summarize(client, text):
     except Exception as e:
         st.error(f"GPT 기반 추출/요약 중 오류: {e}"); return {k: "처리 실패" for k in ["introduction_summary", "methodology_summary", "results_summary"]}
 
-# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼ 개선: 3단 레이아웃 포스터 생성 함수 복원 ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
 def create_3_column_poster(title, authors, summaries, images=[], arxiv_link=None):
     width, height = 1800, 1000
     img = Image.new('RGB', (width, height), color="#FFFFFF")
@@ -109,7 +121,7 @@ def create_3_column_poster(title, authors, summaries, images=[], arxiv_link=None
 
 # --- Streamlit App UI ---
 if font_bold:
-    st.title("📄➡️🖼️ PosterGenius Assistant (v8)")
+    st.title("📄➡️🖼️ PosterGenius Assistant (v9)")
     st.markdown("AI가 논문을 분석/요약하고, 사용자가 **여러 이미지를 선택**하면 **3단 가로형 포스터**를 생성합니다.")
 
     with st.sidebar:
@@ -132,60 +144,30 @@ if font_bold:
         if uploaded_file:
             paper_info = {"title": uploaded_file.name.replace(".pdf", "")}; pdf_stream = BytesIO(uploaded_file.getvalue())
 
-    # --- 이미지 선택 로직 초기화 ---
-    if 'selected_images' not in st.session_state:
-        st.session_state.selected_images = []
-
     if pdf_stream:
         st.markdown("---")
-        st.subheader("3. 포스터에 포함할 이미지 선택")
+        st.subheader("3. 포스터에 포함할 이미지 선택 (다중 선택 가능)")
+        
         extracted_images = extract_images_from_pdf(pdf_stream)
         
         if extracted_images:
-            # ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼ 개선: 새로운 이미지 선택 UI ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
-            st.info("포스터에 포함할 올바른 방향의 이미지를 클릭하여 선택하세요. 다중 선택이 가능합니다.")
+            # ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼ 개선: 간소화된 이미지 선택 UI ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+            options = [f"이미지 {i+1}" for i in range(len(extracted_images))]
+            selected_options = st.multiselect("포스터에 넣을 이미지를 모두 선택하세요. (이미지는 모두 정상 방향입니다)", options)
             
-            # 선택된 이미지를 관리하기 위한 로직
-            if 'chosen_indices' not in st.session_state: st.session_state.chosen_indices = []
+            # 썸네일 가로 나열
+            if extracted_images:
+                st.write("**추출된 이미지 썸네일:**")
+                cols = st.columns(len(extracted_images))
+                for i, image in enumerate(extracted_images):
+                    with cols[i]:
+                        st.image(image, caption=f"이미지 {i+1}", use_container_width=True)
             
-            num_images = len(extracted_images)
-            cols = st.columns(num_images) # 요청대로 가로로 나열
-            
-            for i, image in enumerate(extracted_images):
-                with cols[i]:
-                    st.write(f"**이미지 {i+1}**")
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.image(image, caption="원본", use_container_width=True)
-                        if st.button(f"이 이미지 선택##{i}_orig", use_container_width=True):
-                            if (i, "orig") not in st.session_state.chosen_indices:
-                                st.session_state.chosen_indices.append((i, "orig"))
-                            else:
-                                st.session_state.chosen_indices.remove((i, "orig"))
-                    with col2:
-                        flipped_image = ImageOps.mirror(image)
-                        st.image(flipped_image, caption="좌우반전", use_container_width=True)
-                        if st.button(f"이 이미지 선택##{i}_flip", use_container_width=True):
-                            if (i, "flip") not in st.session_state.chosen_indices:
-                                st.session_state.chosen_indices.append((i, "flip"))
-                            else:
-                                st.session_state.chosen_indices.remove((i, "flip"))
-            
-            st.markdown("---")
-            st.write("**현재 선택된 이미지:**")
             images_to_use = []
-            for idx, orientation in st.session_state.chosen_indices:
-                img_to_add = extracted_images[idx]
-                if orientation == "flip":
-                    img_to_add = ImageOps.mirror(img_to_add)
-                images_to_use.append(img_to_add)
-            
-            if images_to_use:
-                st.image(images_to_use, width=150)
-            else:
-                st.write("선택된 이미지가 없습니다.")
-            # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
-
+            for option in selected_options:
+                idx = int(option.split(" ")[1]) - 1
+                images_to_use.append(extracted_images[idx])
+            # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
         else:
             st.warning("추출할 이미지를 찾지 못했습니다."); images_to_use = []
 
