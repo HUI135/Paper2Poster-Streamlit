@@ -9,7 +9,7 @@ import qrcode
 import json
 
 # --- Streamlit 페이지 설정 ---
-st.set_page_config(page_title="PosterGenius Assistant v9", layout="wide")
+st.set_page_config(page_title="PosterGenius Assistant v9.1", layout="wide")
 
 # --- 폰트 로드 ---
 def load_font(font_filename):
@@ -27,20 +27,19 @@ font_bold, font_regular_large, font_regular_small, font_caption = load_font("Not
 
 # --- 핵심 기능 함수 ---
 
-# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼ 최종 수정: 100% 자동 이미지 반전 교정 ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼ 최종 수정: 올바른 함수 page.get_image_info() 사용 ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
 def extract_images_from_pdf(pdf_stream):
     """PDF에서 이미지를 추출하고, 변환 행렬을 분석하여 자동으로 반전을 교정합니다."""
     images = []
     try:
         pdf_stream.seek(0)
         doc = fitz.open(stream=pdf_stream, filetype="pdf")
-        for page_num in range(len(doc)):
-            # get_image_info() 를 사용하여 변환 행렬 정보까지 가져옴
-            for img_info in doc.page_images(page_num):
+        for page in doc:
+            # page_images() 가 아닌 page.get_image_info() 가 올바른 함수입니다.
+            for img_info in page.get_image_info(xrefs=True):
                 if img_info['width'] < 150 or img_info['height'] < 150: continue
 
                 # 변환 행렬(transformation matrix)의 determinant 값으로 반전 여부 판단
-                # matrix = (a, b, c, d, e, f) -> det = a*d - b*c
                 tm = img_info['transform']
                 is_flipped = (tm[0] * tm[3] - tm[1] * tm[2]) < 0
 
@@ -49,7 +48,7 @@ def extract_images_from_pdf(pdf_stream):
                 if pil_image.mode != "RGB": pil_image = pil_image.convert("RGB")
                 
                 if is_flipped:
-                    pil_image = ImageOps.mirror(pil_image) # 감지된 경우에만 교정
+                    pil_image = ImageOps.mirror(pil_image)
 
                 images.append(pil_image)
         return images
@@ -121,7 +120,7 @@ def create_3_column_poster(title, authors, summaries, images=[], arxiv_link=None
 
 # --- Streamlit App UI ---
 if font_bold:
-    st.title("📄➡️🖼️ PosterGenius Assistant (v9)")
+    st.title("📄➡️🖼️ PosterGenius Assistant (v9.1)")
     st.markdown("AI가 논문을 분석/요약하고, 사용자가 **여러 이미지를 선택**하면 **3단 가로형 포스터**를 생성합니다.")
 
     with st.sidebar:
@@ -151,11 +150,9 @@ if font_bold:
         extracted_images = extract_images_from_pdf(pdf_stream)
         
         if extracted_images:
-            # ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼ 개선: 간소화된 이미지 선택 UI ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
             options = [f"이미지 {i+1}" for i in range(len(extracted_images))]
             selected_options = st.multiselect("포스터에 넣을 이미지를 모두 선택하세요. (이미지는 모두 정상 방향입니다)", options)
             
-            # 썸네일 가로 나열
             if extracted_images:
                 st.write("**추출된 이미지 썸네일:**")
                 cols = st.columns(len(extracted_images))
@@ -167,7 +164,6 @@ if font_bold:
             for option in selected_options:
                 idx = int(option.split(" ")[1]) - 1
                 images_to_use.append(extracted_images[idx])
-            # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
         else:
             st.warning("추출할 이미지를 찾지 못했습니다."); images_to_use = []
 
