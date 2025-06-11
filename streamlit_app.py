@@ -9,7 +9,7 @@ import qrcode
 import json
 
 # --- Streamlit 페이지 설정 ---
-st.set_page_config(page_title="PosterGenius Assistant v11", layout="wide")
+st.set_page_config(page_title="PosterGenius Assistant v11.1", layout="wide")
 
 # --- 폰트 로드 ---
 def load_font(font_filename):
@@ -27,21 +27,28 @@ font_title, font_section, font_body, font_caption = load_font("NotoSansKR-Bold.o
 
 # --- 핵심 기능 함수 ---
 
+# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼ 버그 수정: v9.1의 올바른 함수로 복원 ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
 def extract_images_from_pdf(pdf_stream):
     """PDF에서 이미지를 추출하고, 변환 행렬을 분석하여 자동으로 반전을 교정합니다."""
     images = []
     try:
         pdf_stream.seek(0)
         doc = fitz.open(stream=pdf_stream, filetype="pdf")
-        for page_num in range(len(doc)):
-            for img_info in doc.page_images(page_num, xrefs=True):
+        for page in doc:
+            # doc.page_images() 가 아닌 page.get_image_info() 가 올바른 함수입니다.
+            for img_info in page.get_image_info(xrefs=True):
                 if img_info['width'] < 150 or img_info['height'] < 150: continue
+
                 tm = img_info['transform']
                 is_flipped = (tm[0] * tm[3] - tm[1] * tm[2]) < 0
+
                 base_image = doc.extract_image(img_info['xref'])
                 pil_image = Image.open(BytesIO(base_image["image"]))
                 if pil_image.mode != "RGB": pil_image = pil_image.convert("RGB")
-                if is_flipped: pil_image = ImageOps.mirror(pil_image)
+                
+                if is_flipped:
+                    pil_image = ImageOps.mirror(pil_image)
+
                 images.append(pil_image)
         return images
     except Exception as e:
@@ -57,9 +64,8 @@ def extract_and_summarize(client, text):
     except Exception as e:
         st.error(f"GPT 기반 추출/요약 중 오류: {e}"); return {k: "처리 실패" for k in ["introduction_summary", "methodology_summary", "results_summary"]}
 
-# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼ 포스터 구성 개선: 새로운 빌보드 스타일 레이아웃 ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
 def create_billboard_poster(title, authors, summaries, images=[], arxiv_link=None):
-    width, height = 1920, 1080  # 표준 가로형 비율
+    width, height = 1920, 1080
     img = Image.new('RGB', (width, height), color="#FFFFFF")
     d = ImageDraw.Draw(img)
     
@@ -74,14 +80,12 @@ def create_billboard_poster(title, authors, summaries, images=[], arxiv_link=Non
         for line in lines: d.text((x, y), line, font=font, fill=fill); y += font.getbbox("A")[3] + spacing
         return y
 
-    # --- 헤더 ---
     d.rectangle([(0, 0), (width, 140)], fill="#F0F2F6")
     if arxiv_link:
         qr_img = qrcode.make(arxiv_link).resize((100, 100)); img.paste(qr_img, (width - 140, 20))
     current_y = draw_multiline_text((50, 40), title, font_title, 1700, "#0E1117")
     draw_multiline_text((50, current_y), ", ".join(authors), font_body, 1700, "#555555")
 
-    # --- 3단 레이아웃 설정 ---
     margin, gap = 50, 50
     col_width = (width - 2 * margin - 2 * gap) // 3
     col1_x, col2_x, col3_x = margin, margin + col_width + gap, margin + 2 * (col_width + gap)
@@ -96,14 +100,10 @@ def create_billboard_poster(title, authors, summaries, images=[], arxiv_link=Non
         y = draw_multiline_text((col_x, y), content, font_body, col_width, "#333333")
         current_y[col_index] = y + 40
 
-    # --- 1단: 서론 & 방법론 ---
     if "introduction_summary" in summaries: draw_section(0, "Introduction", summaries["introduction_summary"])
     if "methodology_summary" in summaries: draw_section(0, "Methodology", summaries["methodology_summary"])
-        
-    # --- 2단 (중앙): 결과 ---
     if "results_summary" in summaries: draw_section(1, "Results", summaries["results_summary"])
 
-    # --- 3단: 그림 & 표 ---
     if images:
         y = current_y[2]
         y = draw_multiline_text((col3_x, y), "Figures & Tables", font_section, col_width, "#0033A0", 5)
@@ -120,7 +120,7 @@ def create_billboard_poster(title, authors, summaries, images=[], arxiv_link=Non
 
 # --- Streamlit App UI ---
 if font_title:
-    st.title("📄➡️🖼️ PosterGenius Assistant (v11)")
+    st.title("📄➡️🖼️ PosterGenius Assistant (v11.1)")
     st.markdown("AI가 논문을 분석/요약하고, 사용자가 **여러 이미지를 선택**하면 **개선된 3단 가로형 포스터**를 생성합니다.")
 
     with st.sidebar:
@@ -150,7 +150,6 @@ if font_title:
         extracted_images = extract_images_from_pdf(pdf_stream)
         
         if extracted_images:
-            # ## 썸네일 UI 개선: 한 줄에 4개씩 표시 ##
             options = [f"이미지 {i+1}" for i in range(len(extracted_images))]
             selected_options = st.multiselect("포스터에 넣을 이미지를 모두 선택하세요.", options)
             
