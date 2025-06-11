@@ -9,63 +9,70 @@ import qrcode
 import json
 
 # --- Streamlit 페이지 설정 ---
-st.set_page_config(page_title="PosterGenius Assistant v6", layout="wide")
+st.set_page_config(page_title="PosterGenius Assistant v7", layout="wide")
 
 # --- 폰트 로드 ---
 def load_font(font_filename):
     try:
-        font_b = ImageFont.truetype(font_filename, 48)
-        font_rl = ImageFont.truetype(font_filename.replace("Bold", "Regular"), 28)
-        font_rs = ImageFont.truetype(font_filename.replace("Bold", "Regular"), 20)
-        font_caption = ImageFont.truetype(font_filename.replace("Bold", "Regular"), 16)
+        font_b = ImageFont.truetype(font_filename, 52)
+        font_rl = ImageFont.truetype(font_filename.replace("Bold", "Regular"), 32)
+        font_rs = ImageFont.truetype(font_filename.replace("Bold", "Regular"), 24)
+        font_caption = ImageFont.truetype(font_filename.replace("Bold", "Regular"), 18)
         return font_b, font_rl, font_rs, font_caption
     except IOError:
-        st.error(f"'{font_filename}' 폰트 파일을 찾을 수 없습니다.")
-        return None, None, None, None
+        st.error(f"'{font_filename}' 폰트 파일을 찾을 수 없습니다."); return (None,)*4
 
 font_bold, font_regular_large, font_regular_small, font_caption = load_font("NotoSansKR-Bold.otf")
 
+# --- 핵심 기능 함수 ---
 
-# --- 핵심 기능 함수 (이전과 동일) ---
-def extract_all_images_from_pdf(pdf_stream):
+# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼ 개선: 자동 플립 감지 기능 추가 ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+def extract_images_from_pdf(pdf_stream):
     images = []
     try:
         pdf_stream.seek(0)
         doc = fitz.open(stream=pdf_stream, filetype="pdf")
         for page in doc:
             for img_info in page.get_images(full=True):
-                if img_info[0] < 0 or img_info[2] < 100 or img_info[3] < 100: continue
+                if img_info[0] < 0 or img_info[2] < 150 or img_info[3] < 150: continue
+                
+                # 이미지의 변환 행렬(transformation matrix)을 확인하여 반전 여부 감지
+                # 행렬의 determinant가 음수이면 반전(reflection)을 의미
+                tm = fitz.Matrix(img_info[1], img_info[2], img_info[3], img_info[4], 0, 0)
+                is_flipped = tm.determinant < 0
+
                 base_image = doc.extract_image(img_info[0])
                 pil_image = Image.open(BytesIO(base_image["image"]))
                 if pil_image.mode != "RGB": pil_image = pil_image.convert("RGB")
+                
+                if is_flipped:
+                    pil_image = ImageOps.mirror(pil_image) # 감지된 경우에만 반전 교정
+
                 images.append(pil_image)
         return images
     except Exception as e:
         st.warning(f"이미지 추출 중 오류: {e}"); return []
 
-def extract_sections_with_gpt(client, text):
-    st.info("GPT가 논문 전체 구조를 분석하여 주요 섹션을 추출합니다...")
-    system_prompt = "You are an expert academic assistant. Your task is to extract the full text content of the \"Introduction\", \"Methodology\", and \"Results\" sections from the provided academic paper text. For \"Methodology\", also look for \"Methods\". For \"Results\", also look for \"Experiments\". Respond ONLY with a valid JSON object with three keys: \"introduction\", \"methodology\", \"results\". If a section cannot be found, the value should be an empty string."
+def extract_and_summarize(client, text):
+    st.info("GPT가 논문 전체를 분석하여 섹션 추출 및 요약을 동시에 진행합니다...")
+    system_prompt = "You are an expert academic assistant. Your task is to analyze an academic paper's text. First, extract the content of the 'Introduction', 'Methodology', and 'Results' sections. For 'Methodology', also accept 'Methods'. For 'Results', also accept 'Experiments'. Then, summarize each extracted section in 3-4 sentences in KOREAN. Respond ONLY with a valid JSON object. The JSON object must have keys 'introduction_summary', 'methodology_summary', and 'results_summary'. If a section is not found, its summary should be a string stating that. Do not include explanations outside the JSON."
     try:
         response = client.chat.completions.create(
             model="gpt-4-turbo", messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": text[:15000]}],
             response_format={"type": "json_object"}
         )
-        return json.loads(response.choices[0].message.content)
+        summaries = json.loads(response.choices[0].message.content)
+        # 키 이름 일관성 유지
+        if "introduction_summary" not in summaries: summaries["introduction_summary"] = "[Introduction 섹션을 찾지 못했습니다.]"
+        if "methodology_summary" not in summaries: summaries["methodology_summary"] = "[Methodology 섹션을 찾지 못했습니다.]"
+        if "results_summary" not in summaries: summaries["results_summary"] = "[Results 섹션을 찾지 못했습니다.]"
+        return summaries
     except Exception as e:
-        st.error(f"GPT 기반 섹션 추출 중 오류: {e}"); return {"introduction": "", "methodology": "", "results": "섹션 추출 실패."}
+        st.error(f"GPT 기반 추출/요약 중 오류: {e}"); return {k: "처리 실패" for k in ["introduction_summary", "methodology_summary", "results_summary"]}
 
-def summarize_text_with_gpt(client, text, section_name):
-    if not text.strip(): return f"[{section_name} 섹션의 내용을 찾지 못했습니다.]"
-    try:
-        response = client.chat.completions.create(model="gpt-3.5-turbo", messages=[{"role": "system", "content": "You are a helpful assistant that summarizes academic papers in Korean."}, {"role": "user", "content": f"다음 {section_name}을 한국어 3-4문장으로 요약해줘:\n\n{text}"}])
-        return response.choices[0].message.content
-    except Exception as e: return f"[{section_name} 요약 실패]"
-
-
-# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼ 개선: 3단 레이아웃 포스터 생성 함수 ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
-def create_3_column_poster(title, authors, summaries, images=[], arxiv_link=None):
-    width, height = 1800, 1000  # 가로형 크기 및 비율 조정
+# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼ 개선: 가독성 중심의 2단 레이아웃 포스터 ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+def create_readable_poster(title, authors, summaries, key_image=None, arxiv_link=None):
+    width, height = 1800, 1000
     img = Image.new('RGB', (width, height), color="#FFFFFF")
     d = ImageDraw.Draw(img)
     
@@ -86,121 +93,110 @@ def create_3_column_poster(title, authors, summaries, images=[], arxiv_link=None
         qr_img = qrcode.make(arxiv_link).resize((90, 90)); img.paste(qr_img, (width - 120, 15))
     draw_multiline_text((40, 30), title, font_bold, 1600, "#0E1117")
     
-    # --- 3단 레이아웃 설정 ---
-    margin, gap = 40, 40
-    col_width = (width - 2 * margin - 2 * gap) // 3
-    col1_x, col2_x, col3_x = margin, margin + col_width + gap, margin + 2 * (col_width + gap)
-    current_y = [150] * 3 # 각 단의 y 위치
+    # --- 2단 레이아웃 ---
+    margin, gap = 40, 60
+    col_width = (width - 2 * margin - gap) // 2
+    col1_x, col2_x = margin, margin + col_width + gap
+    y1, y2 = 150, 150
 
-    def draw_section(col_index, title, content):
-        col_x = [col1_x, col2_x, col3_x][col_index]
-        y = current_y[col_index]
+    def draw_section(col_x, y_start, title, content):
+        y = y_start
         y = draw_multiline_text((col_x, y), title, font_regular_large, col_width, "#4A6CFA", 5)
         d.line([(col_x, y), (col_x + col_width, y)], fill="#DDDDDD", width=2)
         y += 15
         y = draw_multiline_text((col_x, y), content, font_regular_small, col_width, "#31333F")
-        current_y[col_index] = y + 30
+        return y + 30
 
     # --- 1단: Introduction & Methodology ---
-    if "introduction" in summaries: draw_section(0, "Introduction", summaries["introduction"])
-    if "methodology" in summaries: draw_section(0, "Methodology", summaries["methodology"])
+    y1 = draw_section(col1_x, y1, "Introduction", summaries.get('introduction_summary', ''))
+    y1 = draw_section(col1_x, y1, "Methodology", summaries.get('methodology_summary', ''))
+    
+    # --- 2단: Results & Key Figure ---
+    y2 = draw_multiline_text((col2_x, y2), "Results", font_regular_large, col_width, "#4A6CFA", 5)
+    d.line([(col2_x, y2), (col2_x + col_width, y2)], fill="#DDDDDD", width=2)
+    y2 += 15
+    # Results 텍스트를 먼저 그리고, 남은 공간에 이미지를 배치
+    if key_image:
+        # 이미지와 텍스트가 차지할 공간을 나눔 (예: 60% 텍스트, 40% 이미지)
+        text_height_limit = y2 + (height - y2) * 0.6
+        final_y = draw_multiline_text((col2_x, y2), summaries.get('results_summary', ''), font_regular_small, col_width, "#31333F")
         
-    # --- 2단: Results ---
-    if "results" in summaries: draw_section(1, "Results", summaries["results"])
-
-    # --- 3단: Figures & Tables ---
-    if images:
-        y = current_y[2]
-        y = draw_multiline_text((col3_x, y), "Figures & Tables", font_regular_large, col_width, "#4A6CFA", 5)
-        d.line([(col3_x, y), (col3_x + col_width, y)], fill="#DDDDDD", width=2)
-        y += 15
-        for i, key_image in enumerate(images):
-            key_image.thumbnail((col_width, col_width)) # 이미지 크기 조절
-            img.paste(key_image, (col3_x, y))
-            y += key_image.height + 5
-            draw_multiline_text((col3_x, y), f"[Fig. {i+1}]", font_caption, col_width, "#888888")
-            y += 25
-        current_y[2] = y
-
+        image_y_start = final_y + 20
+        if image_y_start < height - 100: # 이미지가 들어갈 공간이 있으면
+            key_image.thumbnail((col_width, height - image_y_start - margin))
+            img.paste(key_image, (col2_x, image_y_start))
+    else:
+        # 이미지가 없으면 텍스트만 그림
+        draw_multiline_text((col2_x, y2), summaries.get('results_summary', ''), font_regular_small, col_width, "#31333F")
+        
     return img
 
 # --- Streamlit App UI ---
 if font_bold:
-    st.title("📄➡️🖼️ PosterGenius Assistant (v6)")
-    st.markdown("AI가 논문을 분석/요약하고, 사용자가 **여러 이미지를 선택**하면 **3단 가로형 포스터**를 생성합니다.")
+    st.title("📄➡️🖼️ PosterGenius Assistant (v7)")
+    st.markdown("AI가 논문을 **분석/요약**하고, 사용자가 **핵심 이미지를 지정**하면 **가독성 높은 2단 가로형 포스터**를 생성합니다.")
 
     with st.sidebar:
+        # ... 사이드바 UI ...
         st.header("⚙️ 설정"); openai_api_key = st.secrets.get("OPENAI_API_KEY")
         if not openai_api_key: st.error("API 키를 찾을 수 없습니다.")
         input_option = st.radio("1. 입력 방식 선택:", ('arXiv ID', 'PDF 파일 업로드'))
 
     pdf_stream, paper_info = None, None
-    # ... (논문 로딩 부분은 이전과 동일)
+    # ... 논문 로딩 UI ...
     if input_option == 'arXiv ID':
-        arxiv_id_input = st.text_input("2. 논문 arXiv ID 입력", "1703.06868")
+        arxiv_id_input = st.text_input("2. 논문 arXiv ID 입력", "2005.12872")
         if arxiv_id_input:
             try:
                 paper_info = arxiv.Search(id_list=[arxiv_id_input]).results().__next__()
                 if paper_info:
-                    pdf_stream = BytesIO(requests.get(paper_info.pdf_url).content)
+                    with st.spinner('논문 PDF 다운로드 중...'):
+                        pdf_stream = BytesIO(requests.get(paper_info.pdf_url).content)
                     st.success(f"**{paper_info.title}** 로드 완료!")
-            except StopIteration:
-                st.error("해당 ID의 논문을 찾을 수 없습니다. ID를 확인해주세요.")
+            except StopIteration: st.error("해당 ID의 논문을 찾을 수 없습니다.")
     else:
         uploaded_file = st.file_uploader("2. 논문 PDF 업로드", type="pdf")
         if uploaded_file:
-            paper_info = {"title": uploaded_file.name.replace(".pdf", "")}
-            pdf_stream = BytesIO(uploaded_file.getvalue())
-
-
-    if 'selected_images' not in st.session_state:
-        st.session_state.selected_images = []
+            paper_info = {"title": uploaded_file.name.replace(".pdf", "")}; pdf_stream = BytesIO(uploaded_file.getvalue())
 
     if pdf_stream:
         st.markdown("---")
-        st.subheader("3. 포스터에 포함할 이미지 선택 (다중 선택 가능)")
-        extracted_images = extract_all_images_from_pdf(pdf_stream)
+        st.subheader("3. 포스터에 포함할 핵심 이미지 선택")
+        
+        extracted_images = extract_images_from_pdf(pdf_stream)
         
         if extracted_images:
-            # ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼ 개선: 멀티 이미지 선택 UI ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
-            options = [f"이미지 {i+1}" for i in range(len(extracted_images))]
-            selected_options = st.multiselect("포스터에 넣을 이미지를 모두 선택하세요.", options)
-            
-            st.write("---")
-            # 썸네일과 좌우반전 체크박스 표시
+            # ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼ 개선: 수평적 이미지 나열 UI ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+            cols = st.columns(len(extracted_images))
             for i, image in enumerate(extracted_images):
-                st.image(image, caption=f"이미지 {i+1}", width=200)
-                if st.checkbox(f"이미지 {i+1} 좌우 반전", key=f"flip_{i}"):
-                    st.session_state.selected_images.append({"index": i, "flipped": True, "image": ImageOps.mirror(image)})
-                else:
-                    st.session_state.selected_images.append({"index": i, "flipped": False, "image": image})
-                st.write("---")
-            
-            images_to_use = [item["image"] for item in st.session_state.selected_images if f"이미지 {item['index']+1}" in selected_options]
+                with cols[i]:
+                    st.image(image, caption=f"이미지 {i+1}", use_container_width=True)
 
+            options = ["선택 안함"] + [f"이미지 {i+1}" for i in range(len(extracted_images))]
+            selected_option = st.selectbox("'Results'와 함께 배치할 핵심 이미지를 하나만 선택하세요.", options)
+            
+            image_to_use = None
+            if selected_option != "선택 안함":
+                selected_index = int(selected_option.split(" ")[1]) - 1
+                image_to_use = extracted_images[selected_index]
         else:
-            st.warning("추출할 이미지를 찾지 못했습니다."); images_to_use = []
+            st.warning("추출할 이미지를 찾지 못했습니다."); image_to_use = None
 
         st.markdown("---")
         if st.button("🚀 포스터 생성하기!", type="primary", disabled=(not openai_api_key)):
             client = OpenAI(api_key=openai_api_key)
             pdf_stream.seek(0)
             full_text = "".join(p.get_text() for p in fitz.open(stream=pdf_stream, filetype="pdf"))
-            extracted_sections = extract_sections_with_gpt(client, full_text)
             
-            summaries = {}
-            with st.spinner("각 섹션 내용을 요약하는 중..."):
-                for s_name, s_text in extracted_sections.items():
-                    summaries[s_name] = summarize_text_with_gpt(client, s_text, s_name)
+            summaries = extract_and_summarize(client, full_text)
             
             with st.spinner("포스터를 생성합니다..."):
                 title = getattr(paper_info, 'title', paper_info.get('title', ''))
                 authors = [str(a) for a in getattr(paper_info, 'authors', [])]
                 arxiv_link = getattr(paper_info, 'entry_id', None)
                 
-                poster_image = create_3_column_poster(title, authors, summaries, images_to_use, arxiv_link)
+                poster_image = create_readable_poster(title, authors, summaries, image_to_use, arxiv_link)
                 st.success("🎉 포스터 생성 완료!")
-                # ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼ 개선: use_container_width 사용 ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
                 st.image(poster_image, use_container_width=True)
                 
                 img_byte_arr = BytesIO()
