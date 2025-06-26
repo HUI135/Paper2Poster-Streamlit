@@ -9,7 +9,7 @@ import qrcode
 import json
 
 # --- 페이지 설정 및 기본 스타일 ---
-st.set_page_config(page_title="PosterGenius v12.1", layout="wide")
+st.set_page_config(page_title="PosterGenius", layout="wide")
 
 # [개선] st.session_state 초기화: 앱의 상태를 저장하여 불필요한 재실행을 방지
 if 'step' not in st.session_state:
@@ -145,7 +145,7 @@ def create_poster(title, authors, sections, images, theme, arxiv_link):
 # --- Streamlit App UI ---
 fonts = load_font()
 if fonts:
-    st.title("📄➡️🖼️ PosterGenius v12.1")
+    st.title("📄➡️🖼️ PosterGenius")
     st.markdown("AI 어시스턴트와 함께 논문을 세련된 포스터로 변환해보세요. **3단계**로 손쉽게 완성할 수 있습니다.")
 
     # [수정] st.secrets에서 API 키를 직접 로드
